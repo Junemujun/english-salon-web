@@ -74,7 +74,15 @@ export default function ActivityPage({ params }) {
     <main className="page">
       <section className="card hero">
         <h1>{activity.title}</h1>
-        <p className="muted">{activity.description}</p>
+        <div
+  className="muted"
+  style={{
+    whiteSpace: 'pre-line',
+    lineHeight: '1.8'
+  }}
+>
+  {activity.description}
+</div>
         <p><strong>时间：</strong>{activity.event_time || '待定'}</p>
         <p><strong>地点：</strong>{activity.location || '待定'}</p>
         <p><strong>费用：</strong>{activity.fee_text || '见活动说明'}</p>

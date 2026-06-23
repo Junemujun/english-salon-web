@@ -58,6 +58,16 @@ export default function ActivityPage({ params }) {
       const data = await res.json();
       if (!data.ok) throw new Error(data.message);
       setManageUrl(data.manage_url);
+
+const storageKey = `activity_${params.id}_registration_tokens`;
+const oldTokens = JSON.parse(localStorage.getItem(storageKey) || '[]');
+
+if (data.registration?.edit_token && !oldTokens.includes(data.registration.edit_token)) {
+  localStorage.setItem(
+    storageKey,
+    JSON.stringify([...oldTokens, data.registration.edit_token])
+  );
+}
       setMessage('报名成功，请保存下面的报名管理链接。');
       setActivity(prev => ({ ...prev, registered_count: prev.registered_count + 1 }));
     } catch (err) {

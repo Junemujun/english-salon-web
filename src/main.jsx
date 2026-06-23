@@ -58,8 +58,31 @@ function saveStoredToken(activityId, token) {
 async function api(path, options = {}) {
   const res = await fetch(path, options);
   const contentType = res.headers.get('content-type') || '';
-  if (contentType.includes('application/json')) return res.json();
-  return res;
+  if (contentType.includes('application/json')) {
+    const data = await res.json();
+    return { httpStatus: res.status, ...data };
+  }
+  const text = await res.text();
+  return {
+    ok: res.ok,
+    httpStatus: res.status,
+    message: text || res.statusText || 'Request failed',
+    raw: text
+  };
+}
+
+function formatApiError(data, fallback = '请求失败') {
+  const lines = [
+    data?.message || fallback,
+    data?.httpStatus ? `HTTP: ${data.httpStatus}` : '',
+    data?.operation ? `Operation: ${data.operation}` : '',
+    data?.error?.status ? `Supabase status: ${data.error.status}` : '',
+    data?.error?.code ? `Code: ${data.error.code}` : '',
+    data?.error?.details ? `Details: ${data.error.details}` : '',
+    data?.error?.hint ? `Hint: ${data.error.hint}` : '',
+    data?.error?.raw ? `Raw: ${data.error.raw}` : ''
+  ].filter(Boolean);
+  return lines.join('\n');
 }
 
 function HomePage() {
@@ -465,17 +488,29 @@ function AdminPage() {
   async function saveActivity(e) {
     e.preventDefault();
     setMessage('');
-    const isNew = !selected.id;
-    const data = await api(isNew ? '/api/activities' : `/api/activities/${selected.id}`, {
-      method: isNew ? 'POST' : 'PUT',
-      headers: headers(),
-      body: JSON.stringify(selected)
-    });
-    if (!data.ok) return setMessage(data.message);
-    setMessage('活动已保存。');
-    await loadActivities();
-    setSelected(data.activity);
-    if (data.activity?.id) await selectActivity(data.activity);
+    try {
+      const isNew = !selected.id;
+      const data = await api(isNew ? '/api/activities' : `/api/activities/${selected.id}`, {
+        method: isNew ? 'POST' : 'PUT',
+        headers: headers(),
+        body: JSON.stringify(selected)
+      });
+      if (!data.ok) {
+        const message = formatApiError(data, '保存活动失败');
+        setMessage(message);
+        alert(message);
+        return;
+      }
+      setMessage('活动已保存。');
+      await loadActivities();
+      setSelected(data.activity);
+      if (data.activity?.id) await selectActivity(data.activity);
+    } catch (err) {
+      const message = `保存活动失败\n${err?.message || err}`;
+      setMessage(message);
+      alert(message);
+      console.error('saveActivity error', err);
+    }
   }
 
   async function deleteActivity() {

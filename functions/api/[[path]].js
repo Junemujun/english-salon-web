@@ -1,7 +1,13 @@
 const ONE_DAY_SECONDS = 60 * 60 * 24;
 
 function json(data, init = {}) {
-  return Response.json(data, init);
+  return new Response(JSON.stringify(data), {
+    ...init,
+    headers: {
+      'content-type': 'application/json; charset=utf-8',
+      ...(init.headers || {})
+    }
+  });
 }
 
 function getEnv(context, key) {
@@ -18,27 +24,77 @@ function getSupabaseConfig(context) {
 }
 
 async function supabaseFetch(context, path, init = {}) {
-  const { url, key } = getSupabaseConfig(context);
-  const headers = new Headers(init.headers || {});
-  headers.set('apikey', key);
-  headers.set('authorization', `Bearer ${key}`);
-  headers.set('content-type', headers.get('content-type') || 'application/json');
-  headers.set('prefer', headers.get('prefer') || 'return=representation');
+  try {
+    const { url, key } = getSupabaseConfig(context);
+    const headers = new Headers(init.headers || {});
+    headers.set('apikey', key);
+    headers.set('authorization', `Bearer ${key}`);
+    if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
+    if (!headers.has('prefer') && init.method && init.method !== 'GET') {
+      headers.set('prefer', 'return=representation');
+    }
 
-  const res = await fetch(`${url}/rest/v1/${path}`, {
-    ...init,
-    headers
-  });
+    const res = await fetch(`${url}/rest/v1/${path}`, {
+      ...init,
+      headers
+    });
 
-  const text = await res.text();
-  const data = text ? JSON.parse(text) : null;
-  if (!res.ok) {
-    return { data: null, error: { message: data?.message || data?.hint || text || res.statusText }, count: null };
+    const text = await res.text();
+    let data = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch (parseError) {
+      data = null;
+    }
+
+    if (!res.ok) {
+      return {
+        data: null,
+        error: {
+          message: data?.message || data?.hint || text || res.statusText || 'Supabase request failed',
+          status: res.status,
+          code: data?.code || '',
+          details: data?.details || '',
+          hint: data?.hint || '',
+          raw: text || ''
+        },
+        count: null
+      };
+    }
+
+    const countHeader = res.headers.get('content-range');
+    const rawCount = countHeader?.includes('/') ? countHeader.split('/').pop() : null;
+    const count = rawCount && rawCount !== '*' ? Number(rawCount) : null;
+    return { data, error: null, count };
+  } catch (err) {
+    return {
+      data: null,
+      error: {
+        message: err?.message || String(err) || 'Supabase fetch crashed',
+        status: 0,
+        code: 'SUPABASE_FETCH_EXCEPTION',
+        details: err?.stack || '',
+        hint: 'Check Cloudflare Pages environment variables and Supabase REST connectivity.'
+      },
+      count: null
+    };
   }
+}
 
-  const countHeader = res.headers.get('content-range');
-  const count = countHeader?.includes('/') ? Number(countHeader.split('/').pop()) : null;
-  return { data, error: null, count };
+function errorPayload(message, error = null, extra = {}) {
+  return {
+    ok: false,
+    message: message || error?.message || 'Server error',
+    error: error ? {
+      message: error.message || '',
+      status: error.status || '',
+      code: error.code || '',
+      details: error.details || '',
+      hint: error.hint || '',
+      raw: error.raw || ''
+    } : null,
+    ...extra
+  };
 }
 
 function qs(params) {
@@ -205,7 +261,7 @@ async function listActivities(context) {
     { status: 'neq.deleted' },
     { order: 'created_at.desc' }
   );
-  if (error) return json({ ok: false, message: error.message }, { status: 500 });
+  if (error) return json(errorPayload(error.message, error, { operation: 'listActivities' }), { status: 500 });
 
   const rows = [];
   for (const activity of data || []) {
@@ -224,7 +280,7 @@ async function createActivity(context) {
   if (!payload.title) return json({ ok: false, message: '请填写活动主题' }, { status: 400 });
 
   const { data, error } = await insertRow(context, 'activities', payload);
-  if (error) return json({ ok: false, message: error.message }, { status: 500 });
+  if (error) return json(errorPayload(error.message, error, { operation: 'createActivity', payload }), { status: 500 });
   return json({ ok: true, activity: single(data) });
 }
 
@@ -240,7 +296,7 @@ async function updateActivity(context, id) {
 
   const body = await requestBody(context.request);
   const { data, error } = await updateRows(context, 'activities', { id: `eq.${id}` }, activityPayload(body));
-  if (error) return json({ ok: false, message: error.message }, { status: 500 });
+  if (error) return json(errorPayload(error.message, error, { operation: 'updateActivity', activityId: id }), { status: 500 });
   return json({ ok: true, activity: single(data) });
 }
 

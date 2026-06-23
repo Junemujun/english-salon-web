@@ -1,5 +1,3 @@
-import { createClient } from '@supabase/supabase-js';
-
 const ONE_DAY_SECONDS = 60 * 60 * 24;
 
 function json(data, init = {}) {
@@ -10,15 +8,72 @@ function getEnv(context, key) {
   return context.env[key];
 }
 
-function getSupabase(context) {
+function getSupabaseConfig(context) {
   const url = getEnv(context, 'SUPABASE_URL');
   const key = getEnv(context, 'SUPABASE_SERVICE_ROLE_KEY');
   if (!url || !key) {
     throw new Error('Supabase env missing: SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
   }
-  return createClient(url, key, {
-    auth: { persistSession: false }
+  return { url: url.replace(/\/$/, ''), key };
+}
+
+async function supabaseFetch(context, path, init = {}) {
+  const { url, key } = getSupabaseConfig(context);
+  const headers = new Headers(init.headers || {});
+  headers.set('apikey', key);
+  headers.set('authorization', `Bearer ${key}`);
+  headers.set('content-type', headers.get('content-type') || 'application/json');
+  headers.set('prefer', headers.get('prefer') || 'return=representation');
+
+  const res = await fetch(`${url}/rest/v1/${path}`, {
+    ...init,
+    headers
   });
+
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : null;
+  if (!res.ok) {
+    return { data: null, error: { message: data?.message || data?.hint || text || res.statusText }, count: null };
+  }
+
+  const countHeader = res.headers.get('content-range');
+  const count = countHeader?.includes('/') ? Number(countHeader.split('/').pop()) : null;
+  return { data, error: null, count };
+}
+
+function qs(params) {
+  return new URLSearchParams(params).toString();
+}
+
+async function selectRows(context, table, filters = {}, options = {}) {
+  const params = {
+    select: options.select || '*',
+    ...filters
+  };
+  if (options.order) params.order = options.order;
+  if (options.limit) params.limit = String(options.limit);
+
+  const headers = {};
+  if (options.count) headers.prefer = 'count=exact';
+  return supabaseFetch(context, `${table}?${qs(params)}`, { headers });
+}
+
+async function insertRow(context, table, payload, select = '*') {
+  return supabaseFetch(context, `${table}?select=${encodeURIComponent(select)}`, {
+    method: 'POST',
+    body: JSON.stringify(payload)
+  });
+}
+
+async function updateRows(context, table, filters, payload, select = '*') {
+  return supabaseFetch(context, `${table}?${qs({ ...filters, select })}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload)
+  });
+}
+
+function single(data) {
+  return Array.isArray(data) ? data[0] : data;
 }
 
 function base64Url(bytes) {
@@ -104,24 +159,26 @@ async function requestBody(request) {
   }
 }
 
+async function countRegistrations(context, activityId) {
+  const { count } = await selectRows(
+    context,
+    'registrations',
+    { activity_id: `eq.${activityId}`, deleted_at: 'is.null' },
+    { select: 'id', count: true }
+  );
+  return count || 0;
+}
+
 async function getActivityWithCount(context, id) {
-  const supabase = getSupabase(context);
-  const { data: activity, error } = await supabase
-    .from('activities')
-    .select('*')
-    .eq('id', id)
-    .neq('status', 'deleted')
-    .single();
-
-  if (error) return { error };
-
-  const { count } = await supabase
-    .from('registrations')
-    .select('id', { count: 'exact', head: true })
-    .eq('activity_id', id)
-    .is('deleted_at', null);
-
-  return { activity: { ...activity, registered_count: count || 0 } };
+  const { data, error } = await selectRows(
+    context,
+    'activities',
+    { id: `eq.${id}`, status: 'neq.deleted' },
+    { limit: 1 }
+  );
+  const activity = single(data);
+  if (error || !activity) return { error: error || { message: '活动不存在' } };
+  return { activity: { ...activity, registered_count: await countRegistrations(context, id) } };
 }
 
 function activityPayload(body) {
@@ -142,23 +199,17 @@ async function listActivities(context) {
   const authError = await requireAdmin(context);
   if (authError) return authError;
 
-  const supabase = getSupabase(context);
-  const { data, error } = await supabase
-    .from('activities')
-    .select('*')
-    .neq('status', 'deleted')
-    .order('created_at', { ascending: false });
-
+  const { data, error } = await selectRows(
+    context,
+    'activities',
+    { status: 'neq.deleted' },
+    { order: 'created_at.desc' }
+  );
   if (error) return json({ ok: false, message: error.message }, { status: 500 });
 
   const rows = [];
   for (const activity of data || []) {
-    const { count } = await supabase
-      .from('registrations')
-      .select('id', { count: 'exact', head: true })
-      .eq('activity_id', activity.id)
-      .is('deleted_at', null);
-    rows.push({ ...activity, registered_count: count || 0 });
+    rows.push({ ...activity, registered_count: await countRegistrations(context, activity.id) });
   }
 
   return json({ ok: true, activities: rows });
@@ -172,9 +223,9 @@ async function createActivity(context) {
   const payload = activityPayload(body);
   if (!payload.title) return json({ ok: false, message: '请填写活动主题' }, { status: 400 });
 
-  const { data, error } = await getSupabase(context).from('activities').insert(payload).select('*').single();
+  const { data, error } = await insertRow(context, 'activities', payload);
   if (error) return json({ ok: false, message: error.message }, { status: 500 });
-  return json({ ok: true, activity: data });
+  return json({ ok: true, activity: single(data) });
 }
 
 async function getActivity(context, id) {
@@ -188,27 +239,19 @@ async function updateActivity(context, id) {
   if (authError) return authError;
 
   const body = await requestBody(context.request);
-  const payload = activityPayload(body);
-  const { data, error } = await getSupabase(context)
-    .from('activities')
-    .update(payload)
-    .eq('id', id)
-    .select('*')
-    .single();
-
+  const { data, error } = await updateRows(context, 'activities', { id: `eq.${id}` }, activityPayload(body));
   if (error) return json({ ok: false, message: error.message }, { status: 500 });
-  return json({ ok: true, activity: data });
+  return json({ ok: true, activity: single(data) });
 }
 
 async function deleteActivity(context, id) {
   const authError = await requireAdmin(context);
   if (authError) return authError;
 
-  const { error } = await getSupabase(context)
-    .from('activities')
-    .update({ status: 'deleted', updated_at: new Date().toISOString() })
-    .eq('id', id);
-
+  const { error } = await updateRows(context, 'activities', { id: `eq.${id}` }, {
+    status: 'deleted',
+    updated_at: new Date().toISOString()
+  });
   if (error) return json({ ok: false, message: error.message }, { status: 500 });
   return json({ ok: true });
 }
@@ -217,39 +260,32 @@ async function listRegistrations(context, activityId) {
   const authError = await requireAdmin(context);
   if (authError) return authError;
 
-  const { data, error } = await getSupabase(context)
-    .from('registrations')
-    .select('*')
-    .eq('activity_id', activityId)
-    .is('deleted_at', null)
-    .order('created_at', { ascending: true });
-
+  const { data, error } = await selectRows(
+    context,
+    'registrations',
+    { activity_id: `eq.${activityId}`, deleted_at: 'is.null' },
+    { order: 'created_at.asc' }
+  );
   if (error) return json({ ok: false, message: error.message }, { status: 500 });
   return json({ ok: true, registrations: data || [] });
 }
 
 async function createRegistration(context, activityId) {
   const body = await requestBody(context.request);
-  const supabase = getSupabase(context);
 
-  const { data: activity, error: activityError } = await supabase
-    .from('activities')
-    .select('*')
-    .eq('id', activityId)
-    .eq('status', 'open')
-    .single();
-
+  const { data: activityRows, error: activityError } = await selectRows(
+    context,
+    'activities',
+    { id: `eq.${activityId}`, status: 'eq.open' },
+    { limit: 1 }
+  );
+  const activity = single(activityRows);
   if (activityError || !activity) {
     return json({ ok: false, message: '活动不存在或报名已关闭' }, { status: 404 });
   }
 
-  const { count } = await supabase
-    .from('registrations')
-    .select('id', { count: 'exact', head: true })
-    .eq('activity_id', activityId)
-    .is('deleted_at', null);
-
-  if (activity.max_people > 0 && (count || 0) >= activity.max_people) {
+  const count = await countRegistrations(context, activityId);
+  if (activity.max_people > 0 && count >= activity.max_people) {
     return json({ ok: false, message: '报名已满' }, { status: 400 });
   }
 
@@ -260,38 +296,32 @@ async function createRegistration(context, activityId) {
   }
 
   const editToken = randomToken();
-  const { data, error } = await supabase
-    .from('registrations')
-    .insert({
-      activity_id: activityId,
-      child_name: childName,
-      phone,
-      custom_answers: body.custom_answers || {},
-      edit_token: editToken,
-      updated_at: new Date().toISOString()
-    })
-    .select('*')
-    .single();
-
+  const { data, error } = await insertRow(context, 'registrations', {
+    activity_id: activityId,
+    child_name: childName,
+    phone,
+    custom_answers: body.custom_answers || {},
+    edit_token: editToken,
+    updated_at: new Date().toISOString()
+  });
   if (error) return json({ ok: false, message: error.message }, { status: 500 });
 
   const site = getEnv(context, 'NEXT_PUBLIC_SITE_URL') || new URL(context.request.url).origin;
   return json({
     ok: true,
-    registration: data,
+    registration: single(data),
     manage_url: `${site}/manage/${editToken}`
   });
 }
 
 async function findByToken(context, token) {
-  const supabase = getSupabase(context);
-  const { data, error } = await supabase
-    .from('registrations')
-    .select('*, activities(*)')
-    .eq('edit_token', token)
-    .is('deleted_at', null)
-    .single();
-  return { supabase, data, error };
+  const { data, error } = await selectRows(
+    context,
+    'registrations',
+    { edit_token: `eq.${token}`, deleted_at: 'is.null' },
+    { select: '*,activities(*)', limit: 1 }
+  );
+  return { data: single(data), error };
 }
 
 async function getRegistrationByToken(context, token) {
@@ -302,8 +332,8 @@ async function getRegistrationByToken(context, token) {
 
 async function updateRegistrationByToken(context, token) {
   const body = await requestBody(context.request);
-  const { supabase, data, error } = await findByToken(context, token);
-  if (error || !data) return json({ ok: false, message: '报名记录不存在' }, { status: 404 });
+  const found = await findByToken(context, token);
+  if (found.error || !found.data) return json({ ok: false, message: '报名记录不存在' }, { status: 404 });
 
   const childName = (body.child_name || '').trim();
   const phone = (body.phone || '').trim();
@@ -311,33 +341,31 @@ async function updateRegistrationByToken(context, token) {
     return json({ ok: false, message: '请填写孩子姓名和联系电话' }, { status: 400 });
   }
 
-  const { data: updated, error: updateError } = await supabase
-    .from('registrations')
-    .update({
+  const { data, error } = await updateRows(
+    context,
+    'registrations',
+    { edit_token: `eq.${token}`, deleted_at: 'is.null' },
+    {
       child_name: childName,
       phone,
       custom_answers: body.custom_answers || {},
       updated_at: new Date().toISOString()
-    })
-    .eq('edit_token', token)
-    .is('deleted_at', null)
-    .select('*, activities(*)')
-    .single();
-
-  if (updateError) return json({ ok: false, message: updateError.message }, { status: 500 });
-  return json({ ok: true, registration: updated });
+    },
+    '*,activities(*)'
+  );
+  if (error) return json({ ok: false, message: error.message }, { status: 500 });
+  return json({ ok: true, registration: single(data) });
 }
 
 async function deleteRegistrationByToken(context, token) {
-  const { supabase, data, error } = await findByToken(context, token);
-  if (error || !data) return json({ ok: false, message: '报名记录不存在' }, { status: 404 });
+  const found = await findByToken(context, token);
+  if (found.error || !found.data) return json({ ok: false, message: '报名记录不存在' }, { status: 404 });
 
-  const { error: deleteError } = await supabase
-    .from('registrations')
-    .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-    .eq('edit_token', token);
-
-  if (deleteError) return json({ ok: false, message: deleteError.message }, { status: 500 });
+  const { error } = await updateRows(context, 'registrations', { edit_token: `eq.${token}` }, {
+    deleted_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  });
+  if (error) return json({ ok: false, message: error.message }, { status: 500 });
   return json({ ok: true });
 }
 
@@ -346,32 +374,29 @@ async function updateRegistrationAdmin(context, id) {
   if (authError) return authError;
 
   const body = await requestBody(context.request);
-  const { data, error } = await getSupabase(context)
-    .from('registrations')
-    .update({
+  const { data, error } = await updateRows(
+    context,
+    'registrations',
+    { id: `eq.${id}`, deleted_at: 'is.null' },
+    {
       child_name: body.child_name || '',
       phone: body.phone || '',
       custom_answers: body.custom_answers || {},
       updated_at: new Date().toISOString()
-    })
-    .eq('id', id)
-    .is('deleted_at', null)
-    .select('*')
-    .single();
-
+    }
+  );
   if (error) return json({ ok: false, message: error.message }, { status: 500 });
-  return json({ ok: true, registration: data });
+  return json({ ok: true, registration: single(data) });
 }
 
 async function deleteRegistrationAdmin(context, id) {
   const authError = await requireAdmin(context);
   if (authError) return authError;
 
-  const { error } = await getSupabase(context)
-    .from('registrations')
-    .update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-    .eq('id', id);
-
+  const { error } = await updateRows(context, 'registrations', { id: `eq.${id}` }, {
+    deleted_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  });
   if (error) return json({ ok: false, message: error.message }, { status: 500 });
   return json({ ok: true });
 }
@@ -385,20 +410,16 @@ async function exportCsv(context, id) {
   const authError = await requireAdmin(context);
   if (authError) return authError;
 
-  const supabase = getSupabase(context);
-  const { data: activity, error: activityError } = await supabase
-    .from('activities')
-    .select('*')
-    .eq('id', id)
-    .single();
-  if (activityError) return json({ ok: false, message: activityError.message }, { status: 404 });
+  const { data: activityRows, error: activityError } = await selectRows(context, 'activities', { id: `eq.${id}` }, { limit: 1 });
+  const activity = single(activityRows);
+  if (activityError || !activity) return json({ ok: false, message: activityError?.message || '活动不存在' }, { status: 404 });
 
-  const { data, error } = await supabase
-    .from('registrations')
-    .select('*')
-    .eq('activity_id', id)
-    .is('deleted_at', null)
-    .order('created_at', { ascending: true });
+  const { data, error } = await selectRows(
+    context,
+    'registrations',
+    { activity_id: `eq.${id}`, deleted_at: 'is.null' },
+    { order: 'created_at.asc' }
+  );
   if (error) return json({ ok: false, message: error.message }, { status: 500 });
 
   const fields = Array.isArray(activity.custom_fields) ? activity.custom_fields : [];

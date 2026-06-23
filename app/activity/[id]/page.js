@@ -125,7 +125,31 @@ if (data.registration?.edit_token && !oldTokens.includes(data.registration.edit_
         <p><strong>费用：</strong>{activity.fee_text || '见活动说明'}</p>
         <span className="badge">已报名 {activity.registered_count} / {activity.max_people || '不限'}</span>
       </section>
+{myRegistrations.length > 0 && (
+  <section className="card">
+    <h2>我的报名</h2>
 
+    {myRegistrations.map(item => (
+      <div
+        key={item.id}
+        style={{
+          borderBottom: '1px solid #eee',
+          paddingBottom: '12px',
+          marginBottom: '12px'
+        }}
+      >
+        <p><strong>孩子：</strong>{item.child_name}</p>
+        <p><strong>电话：</strong>{item.phone}</p>
+
+       <p>
+  <a href={'/manage/' + item.edit_token}>
+    编辑报名
+  </a>
+</p>
+      </div>
+    ))}
+  </section>
+)}
       {isFull ? (
         <section className="card">
           <h2>报名已满</h2>

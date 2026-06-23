@@ -6,41 +6,86 @@ function emptyAnswers(fields) {
   return Object.fromEntries((fields || []).map(field => [field.id, field.type === 'checkbox' ? [] : '']));
 }
 
+function registrationTokenKey(activityId) {
+  return `activity_${activityId}_registration_tokens`;
+}
+
+function readStoredTokens(activityId) {
+  if (typeof window === 'undefined') return [];
+
+  try {
+    const raw = window.localStorage.getItem(registrationTokenKey(activityId));
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+  } catch (err) {
+    console.warn('Failed to read registration tokens', err);
+    return [];
+  }
+}
+
+function saveStoredToken(activityId, token) {
+  if (typeof window === 'undefined' || !token) return [];
+
+  try {
+    const oldTokens = readStoredTokens(activityId);
+    const nextTokens = oldTokens.includes(token) ? oldTokens : [...oldTokens, token];
+    window.localStorage.setItem(registrationTokenKey(activityId), JSON.stringify(nextTokens));
+    return nextTokens;
+  } catch (err) {
+    console.warn('Failed to save registration token', err);
+    return [];
+  }
+}
+
+async function fetchMyRegistrations(tokens) {
+  const results = [];
+
+  for (const token of tokens) {
+    try {
+      const res = await fetch(`/api/registrations/${token}`);
+      const data = await res.json();
+
+      if (data.ok && data.registration) {
+        results.push(data.registration);
+      }
+    } catch (err) {
+      console.warn('Failed to load stored registration', err);
+    }
+  }
+
+  return results;
+}
+
 export default function ActivityPage({ params }) {
   const [activity, setActivity] = useState(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState('');
   const [manageUrl, setManageUrl] = useState('');
+  const [myRegistrations, setMyRegistrations] = useState([]);
   const [form, setForm] = useState({ child_name: '', phone: '', custom_answers: {} });
-const [myRegistrations, setMyRegistrations] = useState([]);
+
   useEffect(() => {
-  const loadMyRegistrations = async () => {
-    const storageKey = `activity_${params.id}_registration_tokens`;
-    const tokens = JSON.parse(localStorage.getItem(storageKey) || '[]');
+    let cancelled = false;
 
-    if (!tokens.length) return;
-
-    const results = [];
-
-    for (const token of tokens) {
-      try {
-        const res = await fetch(`/api/registrations/${token}`);
-        const data = await res.json();
-
-        if (data.ok && data.registration) {
-          results.push(data.registration);
-        }
-      } catch (err) {
-        console.error(err);
+    async function loadMyRegistrations() {
+      const tokens = readStoredTokens(params.id);
+      if (!tokens.length) {
+        setMyRegistrations([]);
+        return;
       }
+
+      const results = await fetchMyRegistrations(tokens);
+      if (!cancelled) setMyRegistrations(results);
     }
 
-    setMyRegistrations(results);
-  };
+    loadMyRegistrations();
 
-  loadMyRegistrations();
-}, [params.id]);
+    return () => {
+      cancelled = true;
+    };
+  }, [params.id]);
+
   useEffect(() => {
     fetch(`/api/activities/${params.id}`)
       .then(res => res.json())
@@ -84,17 +129,14 @@ const [myRegistrations, setMyRegistrations] = useState([]);
       });
       const data = await res.json();
       if (!data.ok) throw new Error(data.message);
+
       setManageUrl(data.manage_url);
 
-const storageKey = `activity_${params.id}_registration_tokens`;
-const oldTokens = JSON.parse(localStorage.getItem(storageKey) || '[]');
+      if (data.registration?.edit_token) {
+        const tokens = saveStoredToken(params.id, data.registration.edit_token);
+        setMyRegistrations(await fetchMyRegistrations(tokens));
+      }
 
-if (data.registration?.edit_token && !oldTokens.includes(data.registration.edit_token)) {
-  localStorage.setItem(
-    storageKey,
-    JSON.stringify([...oldTokens, data.registration.edit_token])
-  );
-}
       setMessage('报名成功，请保存下面的报名管理链接。');
       setActivity(prev => ({ ...prev, registered_count: prev.registered_count + 1 }));
     } catch (err) {
@@ -104,6 +146,20 @@ if (data.registration?.edit_token && !oldTokens.includes(data.registration.edit_
     }
   }
 
+  async function copyManageUrl() {
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(manageUrl);
+        setMessage('报名管理链接已复制。');
+        return;
+      }
+    } catch (err) {
+      console.warn('Failed to copy manage URL', err);
+    }
+
+    setMessage('复制失败，请手动长按或选中链接复制。');
+  }
+
   if (loading) return <main className="page"><div className="card">正在加载活动...</div></main>;
   if (!activity) return <main className="page"><div className="card">{message || '活动不存在'}</div></main>;
 
@@ -111,45 +167,33 @@ if (data.registration?.edit_token && !oldTokens.includes(data.registration.edit_
     <main className="page">
       <section className="card hero">
         <h1>{activity.title}</h1>
-        <div
-  className="muted"
-  style={{
-    whiteSpace: 'pre-line',
-    lineHeight: '1.8'
-  }}
->
-  {activity.description}
-</div>
+        <div className="muted" style={{ whiteSpace: 'pre-line', lineHeight: '1.8' }}>
+          {activity.description}
+        </div>
         <p><strong>时间：</strong>{activity.event_time || '待定'}</p>
         <p><strong>地点：</strong>{activity.location || '待定'}</p>
         <p><strong>费用：</strong>{activity.fee_text || '见活动说明'}</p>
         <span className="badge">已报名 {activity.registered_count} / {activity.max_people || '不限'}</span>
       </section>
-{myRegistrations.length > 0 && (
-  <section className="card">
-    <h2>我的报名</h2>
 
-    {myRegistrations.map(item => (
-      <div
-        key={item.id}
-        style={{
-          borderBottom: '1px solid #eee',
-          paddingBottom: '12px',
-          marginBottom: '12px'
-        }}
-      >
-        <p><strong>孩子：</strong>{item.child_name}</p>
-        <p><strong>电话：</strong>{item.phone}</p>
+      {myRegistrations.length > 0 && (
+        <section className="card" style={{ background: '#f6fffb' }}>
+          <h2>我的报名</h2>
+          <p className="muted">这台设备保存过以下报名管理入口，可继续编辑或删除自己的报名。</p>
+          <div className="list">
+            {myRegistrations.map(item => (
+              <div className="list-item" key={item.edit_token}>
+                <div>
+                  <strong>{item.child_name || '已报名'}</strong>
+                  <p className="muted">{item.created_at ? new Date(item.created_at).toLocaleString() : ''}</p>
+                </div>
+                <a className="button-link" href={'/manage/' + item.edit_token}>编辑报名</a>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
-       <p>
-  <a href={'/manage/' + item.edit_token}>
-    编辑报名
-  </a>
-</p>
-      </div>
-    ))}
-  </section>
-)}
       {isFull ? (
         <section className="card">
           <h2>报名已满</h2>
@@ -201,7 +245,7 @@ if (data.registration?.edit_token && !oldTokens.includes(data.registration.edit_
               <p className="muted">请复制保存。以后可用它修改或删除自己的报名。</p>
               <input readOnly value={manageUrl} onFocus={e => e.target.select()} />
               <div className="actions">
-                <button type="button" className="secondary" onClick={() => navigator.clipboard.writeText(manageUrl)}>复制链接</button>
+                <button type="button" className="secondary" onClick={copyManageUrl}>复制链接</button>
               </div>
             </div>
           )}

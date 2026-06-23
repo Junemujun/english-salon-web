@@ -116,6 +116,32 @@ button.danger {
   font-weight: 800;
 }
 
+.list {
+  display: grid;
+  gap: 10px;
+}
+
+.list-item {
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 12px;
+}
+
+.button-link {
+  background: var(--green);
+  border-radius: 999px;
+  color: white;
+  display: inline-block;
+  font-weight: 800;
+  padding: 10px 14px;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 .privacy {
   color: var(--muted);
   font-size: 13px;

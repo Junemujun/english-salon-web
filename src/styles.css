@@ -1,0 +1,26 @@
+@import '../app/globals.css';
+
+.preserve-lines {
+  line-height: 1.8;
+  white-space: pre-line;
+}
+
+.mine-card {
+  background: #f6fffb;
+}
+
+.nested-card {
+  margin-top: 16px;
+}
+
+.compact-card {
+  padding: 14px;
+}
+
+.section-title {
+  margin-top: 22px;
+}
+
+.option-label {
+  font-weight: 500;
+}

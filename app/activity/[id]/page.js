@@ -13,7 +13,34 @@ export default function ActivityPage({ params }) {
   const [message, setMessage] = useState('');
   const [manageUrl, setManageUrl] = useState('');
   const [form, setForm] = useState({ child_name: '', phone: '', custom_answers: {} });
+const [myRegistrations, setMyRegistrations] = useState([]);
+  useEffect(() => {
+  const loadMyRegistrations = async () => {
+    const storageKey = `activity_${params.id}_registration_tokens`;
+    const tokens = JSON.parse(localStorage.getItem(storageKey) || '[]');
 
+    if (!tokens.length) return;
+
+    const results = [];
+
+    for (const token of tokens) {
+      try {
+        const res = await fetch(`/api/registrations/${token}`);
+        const data = await res.json();
+
+        if (data.ok && data.registration) {
+          results.push(data.registration);
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }
+
+    setMyRegistrations(results);
+  };
+
+  loadMyRegistrations();
+}, [params.id]);
   useEffect(() => {
     fetch(`/api/activities/${params.id}`)
       .then(res => res.json())
